@@ -1,0 +1,66 @@
+# SKULL Locker (open-source file locker) - independent review by Claude Opus (claude-opus-5-5)
+
+> 10 Nov 2026 · code fingerprint 0aeffc584607d515 · read-only review (no tools). Each fix is decided by the test suite.
+
+## Verdict
+**READY AFTER FIXES.** The crypto design is sound: libsodium secretstream, Argon2id, an authenticated header and a FINAL tag. It should not ship yet. The right-click entry lets a planted module run code (#1). The check before deleting the original never tests the password (#2). Large files crash during the overwrite step (#3). The design document's own pre-release test plan (§5 items 1, 3, 5, 6) has not been done.
+
+## Findings
+| # | Severity | Where (file:function) | Problem | Fix |
+|---|---|---|---|---|
+| 1 | high | `__main__.py:menu_entries` | The command is `pythonw -m skull_locker`. With `-m`, Python puts the working directory first on `sys.path`, and Explorer normally starts a verb in the clicked file's folder. A `skull_locker/`, `nacl/` or `json.py` dropped into Downloads (for example by an extracted zip) runs as soon as the user right-clicks a file in that folder. | Use `"{py}" -I -m skull_locker …` (Python 3.11+ isolated/safe-path mode), or install a frozen exe or an absolute-path entry-point script. Add a test that the command contains `-I`. |
+| 2 | high | `locker.py:lock` (verify step) | The check calls `_decrypt_to(tmp, key_from=lambda h: key)` with the key still in memory. It never re-derives the key from the password or recovery key using the header on disk. A bug or mismatch in `_kdf`, `_wrap`, the stored ops/mem or the encoding passes the check, and then the original is zeroed. The result is a file that nobody can open. | Verify with `_key_from(header_read_from_tmp, password, recovery_key)`. That costs one more Argon2 run, or keep the derived KEK and unwrap each stored entry. Check the recovery entry too. |
+| 3 | medium | `locker.py:lock` (removal) | `f.write(b"\0" * size)` builds the whole file in RAM. A 5 GB file raises `MemoryError` after the `.skull` already exists. A read-only original, or one open in another program on Windows, fails with `PermissionError` at the same point. In the GUI either failure is silent (see #8). | Overwrite in `CHUNK`-sized pieces. Catch errors and report "locked, but the original could not be removed" with the path. |
+| 4 | medium | `locker.py:lock` | Nothing checks that the original stayed the same between reading and deleting. `size` is read again after encryption. If an app appends to the file during the lock, the added data is zeroed and deleted without being encrypted. | Hash the plaintext while encrypting and compare it with a hash taken during verify. Compare `st_size`/`st_mtime_ns` before and after. On Windows, open the file with deny-write sharing. |
+| 5 | medium | `locker.py:_key_from`, `_decrypt_to` | `ops`, `mem`, `chunk` and the `keys` list are used before anything is authenticated. A crafted file with `mem=2**40`, a huge `ops`, `chunk=10**12`, or thousands of `"password"` entries (each runs Argon2 again) hangs the machine or exhausts memory. | Require `v==1`, the expected `alg`, `chunk==CHUNK`, ops and mem within fixed bounds, and at most one password entry and one recovery entry. Derive the KEK once. |
+| 6 | medium | `locker.py:_kdf` | The password is encoded as UTF-8 without Unicode normalization. Devanagari or accented passwords typed through different IMEs or OSes (NFC vs NFD) produce different keys, so the owner is locked out. This matters because a Hindi UI is planned. | Apply `unicodedata.normalize("NFC", password)` on both lock and unlock, and record the normalization in the header. |
+| 7 | medium | `locker.py:lock`, `unlock` | Nothing makes the rename durable before the other copy is deleted: there is no directory fsync after `os.replace`, and on Windows the rename is not write-through. After a power cut the rename can be lost while the delete survives. | POSIX: fsync the parent directory after the replace. Windows: `MoveFileExW(..., MOVEFILE_WRITE_THROUGH)`. Only then remove the other copy. |
+| 8 | medium | `__main__.py:_gui` | Only `LockError` is caught. Under `pythonw` there is no console, so an `OSError`, `MemoryError` or `ValueError` closes the window without a word. The user doesn't know whether the file is locked, or whether the original still exists. | Catch `Exception`, show a generic message saying which files exist now, and write details to a log file. |
+| 9 | medium | `locker.py:unlock` (restored name) | The restored name comes from whoever made the file, and files are shared by email. A sender can hide an `.exe` with the right-to-left override character U+202E or a trailing space, or use reserved names (`CON`, `NUL`) or `:` (alternate data streams). The output also loses Mark-of-the-Web, so a downloaded `.skull` produces an executable that SmartScreen won't check. | Remove control and bidi characters, reject reserved names and `:`, and warn about executable extensions. Copy the `Zone.Identifier` stream from the `.skull` file to the output. |
+| 10 | medium | `__main__.py:_gui`, `main` | The recovery key is shown only after the original is destroyed, in a dialog that can be dismissed by accident, and is never confirmed. The CLI prints it into terminal scrollback and logs. There is no checksum, so one typo gives a generic failure. The design document promises 24 words; the code gives 64 hex characters. | Generate and show the key before locking and require it to be typed back (at least partly). Add a checksum or a word encoding. On unlock, ignore spaces and letter case. |
+| 11 | low | `locker.py:unlock` | The temp name `<stem>.unlocking.tmp` is fixed and opened with `"wb"`. An existing file with that name is overwritten, then deleted if the unlock fails. Two concurrent unlocks collide. Between `dest.exists()` and `os.replace`, a file can appear at `dest` and be silently overwritten. | Create the temp file with `tempfile.mkstemp(dir=dest_dir)`. Place the final file without overwriting: `os.link` plus unlink, or create it with `O_EXCL`. |
+| 12 | low | `locker.py:lock` | A symlinked source: `is_file()` follows the link, the target is encrypted, then the **target** is zeroed and only the link is removed. A hard link with `st_nlink > 1` zeroes the data for every other name too. | Check with `lstat` and refuse links, or warn. |
+| 13 | low | `locker.py:lock` | The same file key is used directly for both secretstream and the name AEAD, with no domain separation. Nothing exploitable is known, but the format is still unpublished, so this costs nothing to fix now. | Derive subkeys with `crypto_kdf_derive_from_key` (id 1 for the stream, id 2 for the name). |
+| 14 | low | `locker.py:_read_header`, `_decrypt_to` | The header is not validated. A JSON list, string or deeply nested document raises `AttributeError` or `RecursionError` instead of `LockError`. `v` and `alg` are never checked, so there is no version gate for future formats. | Validate the header against a strict schema and turn every parse failure into `LockError`. |
+| 15 | low | `__main__.py` / `locker.py` (password in memory) | Python strings and bytes holding the password, KEK and file key can't be wiped. The Tk entry widget keeps the text too. These can end up in the swap file, hiberfil or crash dumps. | Say so in the threat model and keep secrets alive as briefly as possible. Optionally use `bytearray` plus `sodium_memzero` for the keys. |
+| 16 | low | `locker.py:_decrypt_to` | When a chunk fails after the key was unwrapped successfully, the message still says "wrong password or recovery key". The user is misled, and the GUI pointlessly retries with the recovery key. | At that point say "the file is damaged or was changed". |
+| 17 | low | `locker.py:lock` | `recovery_key` is not validated. Non-hex input or the wrong length raises a raw `ValueError` or a nacl error instead of `LockError`. | Require exactly 64 hex characters after normalizing; otherwise raise `LockError`. |
+| 18 | low | `__main__.py:menu_entries` | `.replace("python.exe", …)` is case-sensitive, so `Python.exe` is left alone and a console window flashes. If the venv used at install time is deleted, the menu breaks. Selecting several files opens one password prompt per file. | Use `Path(sys.executable).with_name("pythonw.exe")` if it exists. Document reinstalling the menu. Use a single instance or a queue for multi-select. |
+| 19 | low | `docs/skull/file-locker-design.md` | The document doesn't match the code: 24 words vs hex; "a sample of chunks" vs every chunk (the code is better); `name.skull.tmp`; the header field names; parameter `p`; an AES-GCM fallback and folder packing that don't exist. | Correct the document and publish a format spec that matches the code exactly. |
+| 20 | low | `locker.py:lock` (overwrite) | A one-pass zero overwrite promises more than it does. In OneDrive or Dropbox folders the zeroed file syncs as a new version and the plaintext stays in version history. NTFS and SSDs keep copies too. | State this in the UI. Recommend locking a file before it goes into a synced folder. |
+| 21 | low | `locker.py` (policy) | An 8-character minimum is weak against offline guessing, even with 64 MiB Argon2. | Add a strength estimator such as zxcvbn. Consider about 256 MiB, since the KDF runs only once per lock or unlock. |
+| 22 | low | `tests/test_skull_locker.py` | `"Software\Classes"` contains the invalid escape `\C`, which gives a `SyntaxWarning` on Python 3.12+ and will become an error later. | Use a raw string: `r"Software\Classes"`. |
+
+## Missing tests
+1. Known-answer test: decrypt a fixed `.skull` file checked into the repo, so the format stays stable (design §5.1).
+2. A deliberately broken password wrap (monkeypatch `_wrap`) must make `lock` fail and leave the original untouched. This covers #2.
+3. Removing the **final chunk exactly at its boundary** (drop the last `5 + ABYTES` bytes) is rejected. Today's cuts are only mid-chunk, at -1, 40 and 9.
+4. Reordering, duplicating or deleting a middle chunk is rejected.
+5. Splicing a header from file A onto the stream from file B (same password) is rejected.
+6. Every byte is flipped, not every 7th, including the length field and the secretstream header, on a multi-chunk file.
+7. Headers with huge `ops`, `mem` or `chunk`, or with thousands of key entries, are rejected quickly and without large memory use.
+8. Header fuzzing: a non-dict, wrong types, deep nesting, an unknown `v` or `alg`. Each gives `LockError` and nothing else (design §5.5).
+9. Fault injection or a kill at every step: before/after `os.replace`, during the zero overwrite, before/after `src.unlink`, and mid-unlock. At least one complete copy always exists (design §5.3).
+10. The source file grows or changes during lock, and the change is detected.
+11. A file larger than available memory (or a mocked `stat` size) locks without loading the whole file, and the overwrite step doesn't allocate the full size.
+12. A read-only original, or one locked by another program: the error is reported and both files remain.
+13. A symlink or hard-link source does not zero the target.
+14. A password typed in NFC locks, and the same password in NFD unlocks.
+15. Malicious embedded names (`CON`, `a:b`, `..`, `""`, U+202E, very long names) give a safe output name.
+16. A pre-existing `<stem>.unlocking.tmp` is not clobbered, and a destination that appears during unlock is not overwritten.
+17. The unlock and recovery paths in both the CLI and the GUI. The current CLI test answers "n", so the recovery key is never generated.
+18. A recovery key with spaces or uppercase letters works; a malformed key gives `LockError` at both lock and unlock.
+19. The menu command contains `-I` and can't import a planted `skull_locker` module from the working directory. `menu_entries()` handles `Python.exe` and venv paths.
+20. `out_dir` and `remove_locked=False` behave as documented.
+21. 1,000+ random round trips (the current test does 60) and one 5 GB run (design §5.4/§5.5).
+
+## What is done well
+- Only libsodium primitives are used, through PyNaCl. Nothing is home-made.
+- The header, the length prefix and the magic bytes are authenticated as associated data of the first chunk, using the raw bytes rather than re-serialized JSON.
+- Truncation and trailing data are caught by the FINAL tag plus the "data after the end" check, and secretstream prevents reordering.
+- The file key is random and per file, wrapped separately by the password and the recovery key. The salt and every nonce are random.
+- The locked copy is written to a temp file, fsynced, fully decrypted and renamed before the original is touched, and the temp file is cleaned up on any exception.
+- Unlock never writes to a path taken from inside the file (`Path(name).name`), and never overwrites an existing file in the normal case.
+- Wrong-key and tampering failures share one message, so there is no oracle telling an attacker which part was wrong. The header length is capped at 1 MiB.
+- The context menu is per-user (HKCU) with no admin rights, `%1` is quoted, and the registry builder is pure and testable.
+- The tests already cover all edge sizes, wrong keys, tampering, odd Unicode names and no-overwrite.
