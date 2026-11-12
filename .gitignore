@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+skull_locker/skull_launch.pyw
+*.skull
+!tests/data/*.skull

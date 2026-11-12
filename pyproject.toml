@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skull-locker"
+version = "0.1.0"
+description = "Lock any file with a password using only proven cryptography (libsodium Argon2id + XChaCha20-Poly1305)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "skull (adris.tech)" }]
+keywords = ["encryption", "file-encryption", "password", "libsodium", "argon2", "xchacha20", "security", "privacy"]
+dependencies = ["PyNaCl>=1.5"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Topic :: Security :: Cryptography",
+]
+
+[project.urls]
+Homepage = "https://www.adris.tech/skull"
+Source = "https://github.com/skull-org/skull-locker"
+Issues = "https://github.com/skull-org/skull-locker/issues"
+
+[project.scripts]
+skull = "skull_locker.__main__:main"
+
+[tool.setuptools]
+packages = ["skull_locker"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
